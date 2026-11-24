@@ -1,0 +1,26 @@
+diff --git a/sagemaker-train/src/sagemaker/train/sm_recipes/utils.py b/sagemaker-train/src/sagemaker/train/sm_recipes/utils.py
+index ab1e332e..9842af75 100644
+--- a/sagemaker-train/src/sagemaker/train/sm_recipes/utils.py
++++ b/sagemaker-train/src/sagemaker/train/sm_recipes/utils.py
+@@ -550,8 +550,8 @@ def _is_llmft_recipe(
+     A recipe is considered a LLMFT recipe if either:
+ 
+     1. (Training) It has a ``run`` section whose ``model_type`` is
+-       ``llm_finetuning_aws`` or ``verl`` and it has a ``training_config``
+-       section, OR
++       ``llm_finetuning_aws``, ``verl`` or ``trl`` and it has a
++       ``training_config`` section, OR
+     2. (Evaluation) It is an open-source SMTJ evaluation recipe: it has an
+        ``evaluation`` section, no ``trainer``/``training_config``, and is not a
+        Nova recipe. These share the LLMFT submission/packaging path.
+@@ -564,9 +564,7 @@ def _is_llmft_recipe(
+     """
+     run_config = recipe.get("run", {})
+     model_type = (run_config.get("model_type") or "").lower()
+-    has_llmft_model = model_type == "llm_finetuning_aws"
+-    has_verl_model = model_type == "verl"
+-    is_llmft_training = (bool(has_llmft_model) or bool(has_verl_model)) and bool(
++    is_llmft_training = model_type in ("llm_finetuning_aws", "verl", "trl") and bool(
+         recipe.get("training_config")
+     )
+ 

@@ -1,0 +1,13 @@
+[project]
+name = "hf-recipes"
+version = "0.1.0"
+description = "Run SageMaker HyperPod recipes with run.model_type: trl on the Hugging Face training DLC"
+requires-python = ">=3.10"
+dependencies = ["pyyaml", "trl"]
+
+[project.scripts]
+hf-recipes-smtj = "hf_recipes.smtj:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

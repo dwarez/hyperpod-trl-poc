@@ -1,0 +1,197 @@
+diff --git a/launcher/nemo/k8s_templates/training/training.yaml b/launcher/nemo/k8s_templates/training/training.yaml
+index b970638..93debb5 100644
+--- a/launcher/nemo/k8s_templates/training/training.yaml
++++ b/launcher/nemo/k8s_templates/training/training.yaml
+@@ -244,10 +244,10 @@ spec:
+           {{- end }}
+           {{- if $config.volumes }}
+           {{- range $config.volumes }}
+-            - name: {{ .volumeName }}
+-              hostPath:
+-                path: {{ .hostPath }}
+-                type: Directory
++          - name: {{ .volumeName }}
++            hostPath:
++              path: {{ .hostPath }}
++              type: Directory
+           {{- end }}
+           {{- end }}
+           {{- if not $config.customScript }}
+diff --git a/launcher/nemo/recipe_stages.py b/launcher/nemo/recipe_stages.py
+index c725174..d47e015 100755
+--- a/launcher/nemo/recipe_stages.py
++++ b/launcher/nemo/recipe_stages.py
+@@ -42,7 +42,7 @@ class SMTrainingGPURecipe(SMTraining):
+ 
+     @property
+     def _default_repo(self):
+-        if self._is_verl_non_ray_job():
++        if self._is_verl_non_ray_job() or self._is_trl_job():
+             return None
+         use_default = self.cfg.get("git", {}).get("use_default", True)
+         return SM_ADAPTER_REPO if use_default else None
+@@ -68,6 +68,9 @@ class SMTrainingGPURecipe(SMTraining):
+     def _entry_module(self):
+         if self.cfg.get("entry_module", None):
+             return self.cfg.entry_module
++        if self._is_trl_job():
++            # Shipped in the Hugging Face training DLC (hf_recipes package)
++            return "hf_recipes.worker"
+         if self._is_verl_non_ray_job():
+             trainer_cfg = OmegaConf.select(self.cfg, "recipes.training_config.trainer") or {}
+             if "beta" in trainer_cfg:
+diff --git a/launcher/nemo/stages.py b/launcher/nemo/stages.py
+index 40be106..2b36387 100644
+--- a/launcher/nemo/stages.py
++++ b/launcher/nemo/stages.py
+@@ -739,6 +739,9 @@ class SMTraining(Training):
+                     )
+                 case "mtrl":
+                     recipe_template_processor = MtrlRecipeTemplateProcessor(self.cfg, platform=self.cfg.cluster_type)
++                case "trl":
++                    # No launch_json templatization (catalog/Studio) for TRL recipes yet
++                    recipe_template_processor = None
+                 case _:
+                     raise ValueError(f"Unsupported model type: {model_type}")
+ 
+@@ -1449,6 +1452,10 @@ class SMTraining(Training):
+ 
+         return verl_model and not ray_cluster
+ 
++    def _is_trl_job(self):
++        model_type = OmegaConf.select(self.cfg, "recipes.run.model_type")
++        return model_type is not None and str(model_type).lower() == "trl"
++
+     # @override - available in Python 3.12 - `template_root` is required by parent implementation
+     def _make_k8s_spec_file(
+         self, template_root: str, cluster_parameters: Dict, job_path: JobPaths, stage_cfg_path=None
+diff --git a/main.py b/main.py
+index 9781245..af16425 100755
+--- a/main.py
++++ b/main.py
+@@ -248,7 +248,7 @@ def preprocess_config(cfg) -> Tuple[bool, bool]:
+             if cfg.training.get("model", None) == None:
+                 cfg.training.model = {"ub_tp_comm_overlap": False}
+ 
+-        if model_type in ["hf", "llm_finetuning_aws", "verl", "hyperpod_checkpointless_nemo"]:
++        if model_type in ["hf", "llm_finetuning_aws", "verl", "hyperpod_checkpointless_nemo", "trl"]:
+             return False, True
+ 
+     return False, False
+diff --git a/recipes_collection/recipes/fine-tuning/trl/trl-grpo-rlvr-qwen-3-0-dot-6b-lora-smoke.yaml b/recipes_collection/recipes/fine-tuning/trl/trl-grpo-rlvr-qwen-3-0-dot-6b-lora-smoke.yaml
+new file mode 100644
+index 0000000..f77895e
+--- /dev/null
++++ b/recipes_collection/recipes/fine-tuning/trl/trl-grpo-rlvr-qwen-3-0-dot-6b-lora-smoke.yaml
+@@ -0,0 +1,49 @@
++display_name: Qwen 3 0.6B GRPO RLVR with LoRA (TRL, smoke test)
++version: 0.1.0
++instance_types: ["ml.g6e.12xlarge", "ml.g5.12xlarge"]
++
++run:
++  name: trl-grpo-rlvr-qwen-3-0-dot-6b-lora-smoke
++  model_type: trl
++  results_dir: ${base_results_dir}/${.name}
++
++trainer:
++  num_nodes: 1
++  devices: 4
++
++training_config:
++  algorithm: grpo
++  args:
++    model_name_or_path: Qwen/Qwen3-0.6B
++    dtype: bfloat16
++    dataset_name: /opt/ml/input/data/train
++    dataset_train_split: train
++    reward_funcs: [accuracy_reward]
++    chat_template_kwargs:
++      enable_thinking: false
++
++    use_peft: true
++    lora_r: 32
++    lora_alpha: 64
++    lora_target_modules: all-linear
++
++    learning_rate: 1.0e-5
++    beta: 0.001
++    num_generations: 4
++    max_completion_length: 256
++    per_device_train_batch_size: 4
++    gradient_accumulation_steps: 1
++    # TRL sizes vLLM's max_num_seqs as per_device_train_batch_size x steps_per_generation x TP;
++    # below 8, vLLM crashes on H100 during CUDA graph capture (see README findings).
++    steps_per_generation: 2
++    max_steps: 10
++
++    use_vllm: true
++    vllm_mode: colocate
++    vllm_gpu_memory_utilization: 0.3
++    vllm_max_model_length: 768
++
++    bf16: true
++    logging_steps: 1
++    report_to: none
++    save_strategy: "no"
+diff --git a/recipes_collection/recipes/fine-tuning/trl/trl-grpo-rlvr-qwen-3-8b-lora.yaml b/recipes_collection/recipes/fine-tuning/trl/trl-grpo-rlvr-qwen-3-8b-lora.yaml
+new file mode 100644
+index 0000000..991c5c5
+--- /dev/null
++++ b/recipes_collection/recipes/fine-tuning/trl/trl-grpo-rlvr-qwen-3-8b-lora.yaml
+@@ -0,0 +1,56 @@
++display_name: Qwen 3 8B GRPO RLVR Fine-Tuning with LoRA (TRL)
++version: 0.1.0
++instance_types: ["ml.p5.48xlarge", "ml.p4de.24xlarge"]
++
++run:
++  name: trl-grpo-rlvr-qwen-3-8b-lora
++  model_type: trl
++  results_dir: ${base_results_dir}/${.name}
++
++trainer:
++  num_nodes: 1
++  devices: 8
++
++# Hyperparameters mirror recipes_collection/recipes/fine-tuning/qwen/verl-grpo-rlvr-qwen-3-8b-lora.yaml
++training_config:
++  algorithm: grpo
++  args:
++    model_name_or_path: Qwen/Qwen3-8B
++    dtype: bfloat16
++    dataset_name: /opt/ml/input/data/train
++    dataset_train_split: train
++    reward_funcs: [accuracy_reward]
++    chat_template_kwargs:
++      enable_thinking: false
++
++    use_peft: true
++    lora_r: 32
++    lora_alpha: 64
++    lora_target_modules: all-linear
++
++    learning_rate: 1.0e-5
++    lr_scheduler_type: constant
++    beta: 0.001
++    epsilon: 0.2
++    epsilon_high: 0.2
++    loss_type: dapo
++    num_generations: 8
++    max_completion_length: 1024
++    temperature: 1.0
++    per_device_train_batch_size: 2
++    gradient_accumulation_steps: 16
++    steps_per_generation: 64
++    num_train_epochs: 2
++
++    use_vllm: true
++    vllm_mode: colocate
++    vllm_gpu_memory_utilization: 0.6
++    vllm_tensor_parallel_size: 2
++    vllm_max_model_length: 1536
++
++    bf16: true
++    gradient_checkpointing: true
++    logging_steps: 1
++    report_to: tensorboard
++    save_steps: 20
++    seed: 42
